@@ -295,7 +295,7 @@ class MessageSender:
                         event.chain_result(
                             [
                                 Plain(
-                                    "媒体发送失败（平台不支持本地路径或文件协议），请检查适配器配置"
+                                    "媒体发送失败，请检查适配器或平台配置"
                                 )
                             ]
                         )
