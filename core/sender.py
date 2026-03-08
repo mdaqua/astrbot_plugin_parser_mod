@@ -1,6 +1,9 @@
+import json
+from importlib.util import find_spec
 from itertools import chain
 from pathlib import Path
 
+from astrbot.api import logger
 from astrbot.core.message.components import (
     BaseMessageComponent,
     File,
@@ -31,6 +34,11 @@ from .exception import (
 )
 from .render import Renderer
 
+if find_spec("aiocqhttp.exceptions"):
+    from aiocqhttp.exceptions import ActionFailed as AiocqhttpActionFailed
+else:
+    AiocqhttpActionFailed = None
+
 
 class MessageSender:
     """
@@ -50,6 +58,11 @@ class MessageSender:
     def __init__(self, config: PluginConfig, renderer: Renderer):
         self.cfg = config
         self.renderer = renderer
+
+    def _to_file_uri(self, path: Path) -> str:
+        if not path.is_absolute():
+            path = path.resolve()
+        return path.as_uri()
 
     def _build_send_plan(self, result: ParseResult) -> dict:
         """
@@ -109,7 +122,7 @@ class MessageSender:
             return
 
         if image_path := await self.renderer.render_card(result):
-            await event.send(event.chain_result([Image(str(image_path))]))
+            await event.send(event.chain_result([Image(self._to_file_uri(image_path))]))
 
 
     async def _build_segments(
@@ -129,7 +142,7 @@ class MessageSender:
         # 合并转发时，卡片以内联形式作为一个消息段参与合并
         if plan["render_card"] and plan["force_merge"]:
             if image_path := await self.renderer.render_card(result):
-                segs.append(Image(str(image_path)))
+                segs.append(Image(self._to_file_uri(image_path)))
 
         # 轻媒体处理
         for cont in plan["light"]:
@@ -144,9 +157,10 @@ class MessageSender:
 
             match cont:
                 case ImageContent():
-                    segs.append(Image(str(path)))
+                    segs.append(Image(self._to_file_uri(path)))
                 case GraphicsContent() as g:
-                    segs.append(Image(str(path)))
+                    # OneBot/aiocqhttp 本地文件参数要求 file:// URI，而非裸本地路径。
+                    segs.append(Image(self._to_file_uri(path)))
                     # GraphicsContent 允许携带补充文本
                     if g.text:
                         segs.append(Plain(g.text))
@@ -167,15 +181,15 @@ class MessageSender:
 
             match cont:
                 case VideoContent() | DynamicContent():
-                    segs.append(Video(str(path)))
+                    segs.append(Video(self._to_file_uri(path)))
                 case AudioContent():
                     segs.append(
-                        File(name=path.name, file=str(path))
+                        File(name=path.name, file=self._to_file_uri(path))
                         if self.cfg.audio_to_file
-                        else Record(str(path))
+                        else Record(self._to_file_uri(path))
                     )
                 case FileContent():
-                    segs.append(File(name=path.name, file=str(path)))
+                    segs.append(File(name=path.name, file=self._to_file_uri(path)))
 
         return segs
 
@@ -204,6 +218,31 @@ class MessageSender:
 
         return [nodes]
 
+    @staticmethod
+    def _collect_seg_meta(segs: list[BaseMessageComponent]) -> list[dict[str, str]]:
+        """提取消息段元信息，用于失败日志定位。"""
+        meta: list[dict[str, str]] = []
+
+        for seg in segs:
+            item = {"type": seg.__class__.__name__}
+            for attr in ("file", "path", "url"):
+                value = getattr(seg, attr, None)
+                if value:
+                    item["media"] = str(value)
+                    break
+            meta.append(item)
+
+        return meta
+
+    @staticmethod
+    def _is_send_action_failed(exc: Exception) -> bool:
+        """兼容不同适配器发送异常类型。"""
+        if AiocqhttpActionFailed and isinstance(exc, AiocqhttpActionFailed):
+            return True
+
+        type_name = exc.__class__.__name__
+        return any(key in type_name for key in ("ActionFailed", "Send", "Adapter"))
+
 
     async def send_parse_result(
         self,
@@ -228,4 +267,47 @@ class MessageSender:
         segs = self._merge_segments_if_needed(event, segs, plan["force_merge"])
 
         if segs:
-            await event.send(event.chain_result(segs))
+            try:
+                await event.send(event.chain_result(segs))
+            except Exception as e:
+                if not self._is_send_action_failed(e):
+                    # 发送链路外异常也兜底，避免影响插件主处理链
+                    logger.exception(
+                        f"发送解析结果出现非预期异常，将执行降级发送: {e}"
+                    )
+
+                session_id = getattr(event, "unified_msg_origin", "unknown")
+                seg_meta = self._collect_seg_meta(segs)
+                logger.error(
+                    "发送解析结果失败 | payload=%s",
+                    json.dumps(
+                        {
+                            "session_id": str(session_id),
+                            "segments": seg_meta,
+                            "error": str(e),
+                        },
+                        ensure_ascii=False,
+                    ),
+                )
+
+                try:
+                    await event.send(
+                        event.chain_result(
+                            [
+                                Plain(
+                                    "媒体发送失败，请检查适配器或平台配置"
+                                )
+                            ]
+                        )
+                    )
+                except Exception as fallback_e:
+                    logger.error(
+                        "降级消息发送失败 | payload=%s",
+                        json.dumps(
+                            {
+                                "session_id": str(session_id),
+                                "error": str(fallback_e),
+                            },
+                            ensure_ascii=False,
+                        ),
+                    )
