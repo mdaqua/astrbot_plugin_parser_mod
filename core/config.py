@@ -175,6 +175,7 @@ class ParserConfig(ConfigNodeContainer):
     twitter: ParserItem
     weibo: ParserItem
     xiaoheihe: ParserItem
+    zhihu: ParserItem
     xhs: ParserItem
     youtube: ParserItem
 
