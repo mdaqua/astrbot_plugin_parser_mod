@@ -162,6 +162,24 @@ def test_single_netscape_like_header_line_still_uses_header_parsing(
     }
 
 
+def test_two_netscape_like_header_lines_still_use_header_parsing(
+    cookie_module, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.setattr(cookie_module.CookieJar, "save_to_file", lambda self: None)
+
+    jar = build_cookie_jar(
+        cookie_module,
+        tmp_path,
+        "foo=.instagram.com\tTRUE\t/\tTRUE\t2147483647\talpha\tone;\nbar=.instagram.com\tTRUE\t/\tTRUE\t2147483647\tbeta\ttwo",
+        parser_name="instagram_two_row_header",
+    )
+
+    assert jar.get() == {
+        "foo": ".instagram.com\tTRUE\t/\tTRUE\t2147483647\talpha\tone",
+        "bar": ".instagram.com\tTRUE\t/\tTRUE\t2147483647\tbeta\ttwo",
+    }
+
+
 def test_netscape_cookie_file_input_parses_and_writes_runtime_file(
     cookie_module, tmp_path: Path
 ):
@@ -239,6 +257,22 @@ def test_netscape_get_prefers_most_specific_duplicate_cookie(
     assert jar.get(path="/api/v1") == {"sessionid": "api-value"}
 
 
+def test_to_dict_uses_default_lookup_semantics_for_duplicate_cookie_names(
+    cookie_module, tmp_path: Path
+):
+    jar = build_cookie_jar(
+        cookie_module,
+        tmp_path,
+        """# Netscape HTTP Cookie File
+.instagram.com\tTRUE\t/\tTRUE\t2147483647\tsessionid\troot-value
+.instagram.com\tTRUE\t/api\tTRUE\t2147483647\tsessionid\tapi-value
+""",
+        parser_name="instagram_to_dict_duplicates",
+    )
+
+    assert jar.to_dict() == {"sessionid": "root-value"}
+
+
 def test_netscape_comments_blank_and_malformed_lines_are_ignored_safely(
     cookie_module, tmp_path: Path
 ):
@@ -295,8 +329,38 @@ def test_netscape_cookie_path_requires_directory_boundary(
     )
 
     assert jar.get(path="/foo") == {"csrftoken": "token-value"}
+    assert jar.get(path="/foo/") == {"csrftoken": "token-value"}
     assert jar.get(path="/foo/bar") == {"csrftoken": "token-value"}
     assert jar.get(path="/foobar") == {}
+
+    root_jar = build_cookie_jar(
+        cookie_module,
+        tmp_path,
+        """# Netscape HTTP Cookie File
+.instagram.com\tTRUE\t/\tTRUE\t2147483647\trootid\troot-value
+""",
+        parser_name="instagram_root_path_scope",
+    )
+
+    assert root_jar.get(path="/") == {"rootid": "root-value"}
+    assert root_jar.get(path="/foo") == {"rootid": "root-value"}
+    assert root_jar.get(path="/foo/bar") == {"rootid": "root-value"}
+    assert root_jar.get(path="") == {}
+
+    nested_jar = build_cookie_jar(
+        cookie_module,
+        tmp_path,
+        """# Netscape HTTP Cookie File
+.instagram.com\tTRUE\t/foo/bar\tTRUE\t2147483647\tbarid\tbar-value
+""",
+        parser_name="instagram_nested_path_scope",
+    )
+
+    assert nested_jar.get(path="/foo/bar") == {"barid": "bar-value"}
+    assert nested_jar.get(path="/foo/bar/") == {"barid": "bar-value"}
+    assert nested_jar.get(path="/foo/bar/baz") == {"barid": "bar-value"}
+    assert nested_jar.get(path="/foo/barbaz") == {}
+    assert nested_jar.get(path="/foo/barista") == {}
 
 
 def test_netscape_cookie_secure_flag_behavior(cookie_module, tmp_path: Path):
@@ -318,6 +382,31 @@ def test_netscape_cookie_secure_flag_behavior(cookie_module, tmp_path: Path):
     secure_header = jar.get_cookie_header_for_url("https://example.com/foo")
     assert "nonsecureid=nonsecure-value" in secure_header
     assert "secureid=secure-value" in secure_header
+
+
+def test_netscape_purge_expired_cookies_removes_expired_and_persists_valid(
+    cookie_module, tmp_path: Path
+):
+    jar = build_cookie_jar(
+        cookie_module,
+        tmp_path,
+        """# Netscape HTTP Cookie File
+.instagram.com\tTRUE\t/\tFALSE\t1\texpired_cookie\told-value
+.instagram.com\tTRUE\t/\tFALSE\t2147483647\tvalid_cookie\tnew-value
+""",
+        parser_name="instagram_purge_expired",
+    )
+
+    assert jar.get() == {"valid_cookie": "new-value"}
+    assert len(load_cookie_file_rows(jar.cookie_file)) == 2
+
+    jar.purge_expired()
+
+    assert jar.get() == {"valid_cookie": "new-value"}
+    assert jar.get_cookie_header_for_url("https://www.instagram.com/") == (
+        "valid_cookie=new-value"
+    )
+    assert load_cookie_file(jar.cookie_file) == {"valid_cookie": "new-value"}
 
 
 def test_netscape_cookie_with_false_subdomains_stays_exact_host(
@@ -385,6 +474,44 @@ def test_get_cookie_header_for_url_uses_url_hostname(cookie_module, tmp_path: Pa
         "sessionid=abc123; csrftoken=token-value"
     )
     assert jar.get_cookie_header_for_url("https://badinstagram.com/foo") == ""
+
+
+def test_get_and_cookie_header_respect_domain_override_mismatch(
+    cookie_module, tmp_path: Path
+):
+    jar = build_cookie_jar(
+        cookie_module,
+        tmp_path,
+        "sessionid=abc123; csrftoken=token-value",
+        domain="instagram.com",
+        parser_name="instagram_domain_override_mismatch",
+    )
+
+    assert jar.get(domain="badinstagram.com") == {}
+    assert jar.get_cookie_header(path="/foo", domain="badinstagram.com") == ""
+
+
+def test_get_and_cookie_header_respect_domain_override_match(
+    cookie_module, tmp_path: Path
+):
+    jar = build_cookie_jar(
+        cookie_module,
+        tmp_path,
+        """# Netscape HTTP Cookie File
+.instagram.com\tTRUE\t/\tTRUE\t2147483647\tsessionid\tabc123
+.instagram.com\tTRUE\t/\tTRUE\t2147483647\tcsrftoken\ttoken-value
+""",
+        domain="badinstagram.com",
+        parser_name="instagram_domain_override_match",
+    )
+
+    assert jar.get(domain="instagram.com") == {
+        "sessionid": "abc123",
+        "csrftoken": "token-value",
+    }
+    assert jar.get_cookie_header(path="/foo", domain="instagram.com") == (
+        "sessionid=abc123; csrftoken=token-value"
+    )
 
 
 def test_netscape_cookie_file_preserves_empty_cookie_values(

@@ -115,6 +115,8 @@ class CookieJar:
     def purge_expired(self) -> None:
         self.cookies = [c for c in self.cookies if not c.is_expired()]
         self._sync_cookies_str()
+        if self.cookie_file.exists() or self.cookies:
+            self.save_to_file()
 
     def _matching_cookies(
         self, path: str = "/", secure: bool = True, domain: str | None = None
@@ -133,11 +135,7 @@ class CookieJar:
 
     def to_dict(self) -> dict[str, str]:
         """将 cookies 字符串转换为字典"""
-        res = {}
-        for cookie in self.cookies_str.split(";"):
-            name, value = cookie.strip().split("=", 1)
-            res[name] = value
-        return res
+        return self.get()
 
     # ---------------- persistence ----------------
 
@@ -185,6 +183,16 @@ class CookieJar:
 
         domain, include_subdomains, path, secure, expires, name, value = parts
         if not domain or not path or not name:
+            return None
+        if path[0] != "/":
+            return None
+        if any(sep in domain for sep in ("=", ";")):
+            return None
+        if any(char.isspace() for char in domain):
+            return None
+        if any(sep in name for sep in ("=", ";")):
+            return None
+        if any(char.isspace() for char in name):
             return None
         if include_subdomains.upper() not in {"TRUE", "FALSE"}:
             return None
