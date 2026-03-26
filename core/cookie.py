@@ -20,6 +20,9 @@ class Cookie:
     secure: bool
     expires: int
 
+    def __post_init__(self) -> None:
+        self.domain = self.domain.lower()
+
     def is_expired(self) -> bool:
         return self.expires != 0 and self.expires < int(time.time())
 
@@ -36,8 +39,7 @@ class Cookie:
         return self._path_matches(path)
 
     def _domain_matches(self, request_domain: str) -> bool:
-        cookie_domain = self.domain.lower()
-        request_domain = request_domain.lower()
+        cookie_domain = self.domain
 
         if cookie_domain.startswith("."):
             suffix = cookie_domain[1:]
@@ -61,7 +63,7 @@ class CookieJar:
     def __init__(
         self, config: PluginConfig, parser_cfg: ParserItem, domain: str
     ) -> None:
-        self.domain = domain
+        self.domain = domain.lower()
 
         self.cookie_file = config.cookie_dir / f"{parser_cfg.name}_cookies.txt"
         self.cookies: list[Cookie] = []
@@ -85,18 +87,18 @@ class CookieJar:
     def get(
         self, path: str = "/", secure: bool = True, domain: str | None = None
     ) -> dict[str, str]:
-        return {
-            c.name: c.value
-            for c in self._matching_cookies(path=path, secure=secure, domain=domain)
-        }
+        cookies: dict[str, str] = {}
+        for cookie in self._ordered_matching_cookies(
+            path=path, secure=secure, domain=domain
+        ):
+            cookies.setdefault(cookie.name, cookie.value)
+        return cookies
 
     def get_cookie_header(
         self, path: str = "/", secure: bool = True, domain: str | None = None
     ) -> str:
-        cookies = sorted(
-            self._matching_cookies(path=path, secure=secure, domain=domain),
-            key=lambda cookie: len(cookie.path),
-            reverse=True,
+        cookies = self._ordered_matching_cookies(
+            path=path, secure=secure, domain=domain
         )
         return "; ".join(f"{cookie.name}={cookie.value}" for cookie in cookies)
 
@@ -117,8 +119,17 @@ class CookieJar:
     def _matching_cookies(
         self, path: str = "/", secure: bool = True, domain: str | None = None
     ) -> list[Cookie]:
-        request_domain = domain or self.domain
+        request_domain = (domain or self.domain).lower()
         return [c for c in self.cookies if c.match(request_domain, path, secure)]
+
+    def _ordered_matching_cookies(
+        self, path: str = "/", secure: bool = True, domain: str | None = None
+    ) -> list[Cookie]:
+        return sorted(
+            self._matching_cookies(path=path, secure=secure, domain=domain),
+            key=lambda cookie: len(cookie.path),
+            reverse=True,
+        )
 
     def to_dict(self) -> dict[str, str]:
         """将 cookies 字符串转换为字典"""
@@ -131,21 +142,25 @@ class CookieJar:
     # ---------------- persistence ----------------
 
     @staticmethod
+    def _normalize_cookie_newlines(cookies_str: str) -> str:
+        return cookies_str.replace("\r\n", "\n").replace("\r", "\n")
+
+    @staticmethod
     def clean_cookies_str(cookies_str: str) -> str:
-        return cookies_str.replace("\r\n", "\n").replace("\r", "\n").strip(" \n")
+        return CookieJar._normalize_cookie_newlines(cookies_str).strip(" \n")
+
+    @staticmethod
+    def _normalize_header_cookies_str(cookies_str: str) -> str:
+        return CookieJar.clean_cookies_str(cookies_str).replace("\n", "")
 
     @staticmethod
     def _is_netscape_cookie_file(cookies_str: str) -> bool:
-        if any(
-            line.strip().lower() == "# netscape http cookie file"
-            for line in cookies_str.splitlines()
-        ):
-            return True
-
-        return any(
-            CookieJar._parse_netscape_cookie_line(line) is not None
-            for line in cookies_str.splitlines()
-        )
+        for line in cookies_str.splitlines():
+            if line.strip().lower() == "# netscape http cookie file":
+                return True
+            if CookieJar._parse_netscape_cookie_line(line) is not None:
+                return True
+        return False
 
     @staticmethod
     def _parse_netscape_cookie_line(
@@ -195,7 +210,7 @@ class CookieJar:
         self._load_from_header_cookies_str(cookies_str)
 
     def _load_from_header_cookies_str(self, cookies_str: str) -> None:
-        normalized = cookies_str.replace("\n", "").replace("\r", "")
+        normalized = self._normalize_header_cookies_str(cookies_str)
 
         for item in normalized.split(";"):
             item = item.strip()

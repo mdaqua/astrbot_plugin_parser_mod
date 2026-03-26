@@ -220,6 +220,23 @@ def test_netscape_duplicate_cookie_names_are_preserved_in_runtime_file_and_heade
     assert header.index("sessionid=api-value") < header.index("sessionid=root-value")
 
 
+def test_netscape_get_prefers_most_specific_duplicate_cookie(
+    cookie_module, tmp_path: Path
+):
+    jar = build_cookie_jar(
+        cookie_module,
+        tmp_path,
+        """# Netscape HTTP Cookie File
+.instagram.com\tTRUE\t/api\tTRUE\t2147483647\tsessionid\tapi-value
+.instagram.com\tTRUE\t/\tTRUE\t2147483647\tsessionid\troot-value
+""",
+        parser_name="instagram_duplicate_get",
+    )
+
+    assert jar.get(path="/api") == {"sessionid": "api-value"}
+    assert jar.get(path="/api/v1") == {"sessionid": "api-value"}
+
+
 def test_netscape_comments_blank_and_malformed_lines_are_ignored_safely(
     cookie_module, tmp_path: Path
 ):
@@ -278,6 +295,27 @@ def test_netscape_cookie_path_requires_directory_boundary(
     assert jar.get(path="/foo") == {"csrftoken": "token-value"}
     assert jar.get(path="/foo/bar") == {"csrftoken": "token-value"}
     assert jar.get(path="/foobar") == {}
+
+
+def test_netscape_cookie_secure_flag_behavior(cookie_module, tmp_path: Path):
+    jar = build_cookie_jar(
+        cookie_module,
+        tmp_path,
+        """# Netscape HTTP Cookie File
+.example.com\tTRUE\t/foo\tTRUE\t2147483647\tsecureid\tsecure-value
+.example.com\tTRUE\t/foo\tFALSE\t2147483647\tnonsecureid\tnonsecure-value
+""",
+        domain="example.com",
+        parser_name="example_secure_scope",
+    )
+
+    non_secure_header = jar.get_cookie_header_for_url("http://example.com/foo")
+    assert "nonsecureid=nonsecure-value" in non_secure_header
+    assert "secureid=secure-value" not in non_secure_header
+
+    secure_header = jar.get_cookie_header_for_url("https://example.com/foo")
+    assert "nonsecureid=nonsecure-value" in secure_header
+    assert "secureid=secure-value" in secure_header
 
 
 def test_netscape_cookie_with_false_subdomains_stays_exact_host(
