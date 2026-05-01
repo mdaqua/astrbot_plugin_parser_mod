@@ -42,6 +42,7 @@ class YouTubeParser(BaseParser):
             cookiefile=self.cookiejar.cookie_file,
             headers=self.headers,
             proxy=self.proxy,
+            format="all",
         )
         author = await self._fetch_author_info(video_info.channel_id)
 
